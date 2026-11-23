@@ -82,6 +82,59 @@ CREATE TABLE IF NOT EXISTS shot_segments (
 CREATE INDEX IF NOT EXISTS idx_shot_segments_order
     ON shot_segments (order_id, row_index, seg_index);
 
+-- One batch of an actual-copy report (实拷回报) uploaded on an order page.
+CREATE TABLE IF NOT EXISTS copy_reports (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id    INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    created_at  TEXT    NOT NULL,
+    row_count   INTEGER NOT NULL CHECK (row_count > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_copy_reports_order
+    ON copy_reports (order_id, id);
+
+-- Raw rows of one report batch, kept as the audit trail of what was uploaded.
+-- Reconciliation reads the canonical order_confirmations union, not this table.
+CREATE TABLE IF NOT EXISTS copy_report_rows (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id   INTEGER NOT NULL REFERENCES copy_reports(id) ON DELETE CASCADE,
+    row_index   INTEGER NOT NULL CHECK (row_index > 0),
+    orig_reel   TEXT    NOT NULL,
+    arch_start  INTEGER NOT NULL CHECK (arch_start >= 0),
+    frame_count INTEGER NOT NULL CHECK (frame_count > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_copy_report_rows_report
+    ON copy_report_rows (report_id, row_index);
+
+-- Canonical confirmed archive ranges per order: the union of every accepted
+-- report batch, stored as disjoint half-open archive intervals per reel.
+-- A frame is "confirmed" only when the order that first copied it
+-- (archive_segments.created_order_id) lists it here.
+CREATE TABLE IF NOT EXISTS order_confirmations (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id    INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    orig_reel   TEXT    NOT NULL,
+    arch_start  INTEGER NOT NULL CHECK (arch_start >= 0),
+    frame_count INTEGER NOT NULL CHECK (frame_count > 0),
+    UNIQUE (order_id, orig_reel, arch_start)
+);
+CREATE INDEX IF NOT EXISTS idx_order_confirmations_order
+    ON order_confirmations (order_id, orig_reel, arch_start);
+
+-- Safety net: confirmed archive intervals of one order/reel never overlap.
+CREATE TRIGGER IF NOT EXISTS trg_confirmation_no_overlap
+BEFORE INSERT ON order_confirmations
+FOR EACH ROW
+WHEN EXISTS (
+    SELECT 1 FROM order_confirmations
+    WHERE order_id = NEW.order_id
+      AND orig_reel = NEW.orig_reel
+      AND NEW.arch_start < arch_start + frame_count
+      AND arch_start < NEW.arch_start + NEW.frame_count
+)
+BEGIN
+    SELECT RAISE(ABORT, 'confirmed range overlaps an existing confirmation');
+END;
+
 -- Safety net: original frame intervals in one reel may never overlap.
 CREATE TRIGGER IF NOT EXISTS trg_archive_orig_no_overlap
 BEFORE INSERT ON archive_segments

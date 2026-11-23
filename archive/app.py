@@ -27,8 +27,9 @@ from .core import (
     reel_state,
     submit_order,
 )
-from .csv_import import parse_edit_csv_checked
+from .csv_import import parse_edit_csv_checked, parse_report_csv
 from .db import init_db
+from .reports import OrderNotFoundError, submit_report
 
 
 def _load_or_create_secret(database: str) -> str:
@@ -167,7 +168,52 @@ def create_app(config: dict | None = None) -> Flask:
         report = get_order(db_path(), order_no)
         if report is None:
             return render_template("not_found.html", order_no=order_no), 404
-        return render_template("order.html", order=report)
+        return render_template("order.html", order=report, errors=None)
+
+    @app.post("/orders/<path:order_no>/reports")
+    def order_report(order_no: str):
+        """Accept one actual-copy report batch (all-or-nothing)."""
+        check_csrf()
+        if get_order(db_path(), order_no) is None:
+            return render_template("not_found.html", order_no=order_no), 404
+
+        upload = request.files.get("report_file")
+        errors: list[str] = []
+        status = 400
+        if upload is None or not upload.filename:
+            errors.append("请选择要上传的实拷 CSV 文件")
+            data = None
+        else:
+            data = upload.read()
+            if not data:
+                errors.append("上传的 CSV 文件为空")
+                data = None
+
+        rows = []
+        if data is not None:
+            try:
+                rows = parse_report_csv(data)
+            except SubmissionError as exc:
+                errors.extend(exc.messages)
+
+        if not errors:
+            try:
+                report = submit_report(db_path(), order_no, rows)
+            except OrderNotFoundError as exc:
+                errors.extend(exc.messages)
+                status = 404
+            except SubmissionError as exc:
+                errors.extend(exc.messages)
+                status = 400
+            else:
+                return redirect(
+                    url_for("order_detail", order_no=report["order_no"])
+                )
+
+        report = get_order(db_path(), order_no)
+        if report is None:  # pragma: no cover - existence checked above
+            return render_template("not_found.html", order_no=order_no), 404
+        return render_template("order.html", order=report, errors=errors), status
 
     @app.get("/reels/<path:orig_reel>")
     def reel_detail(orig_reel: str):

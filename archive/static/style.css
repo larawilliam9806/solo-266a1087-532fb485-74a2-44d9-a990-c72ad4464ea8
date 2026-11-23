@@ -114,6 +114,23 @@ tbody tr:hover { background: #faf5ea; }
 .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
 .tag.new { background: #e2f0e6; color: var(--new); }
 .tag.reuse { background: #e6eaf4; color: var(--reuse); }
+.tag.pending-tag { background: #f6ead9; color: var(--accent); }
+
+.status { font-size: 14px; font-weight: 600; margin: 8px 0 0; }
+.status.ready { color: var(--new); }
+.status.pending { color: var(--accent); }
+
+.missing {
+    border: 1px solid #e3b6b6;
+    background: #fdf3f3;
+    border-radius: 6px;
+    padding: 10px 14px;
+    margin: 6px 12px 10px;
+    color: var(--error);
+    font-size: 13px;
+}
+.missing table { margin-top: 6px; background: #fff; }
+.ok-line { color: var(--new); }
 
 details.shot { border: 1px solid var(--line); border-radius: 7px; margin-bottom: 12px; background: #fff; }
 details.shot summary { cursor: pointer; padding: 11px 14px; font-size: 13.5px; }

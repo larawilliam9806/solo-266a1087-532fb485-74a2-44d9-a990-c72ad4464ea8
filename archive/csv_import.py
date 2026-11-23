@@ -77,21 +77,23 @@ def _parse_int(value, line_no: int, label: str) -> int:
     return number
 
 
+def _decode(data: bytes) -> str:
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise SubmissionError(
+            f"CSV 文件过大（上限 {MAX_UPLOAD_BYTES // (1024 * 1024)} MB）"
+        )
+    for encoding in ("utf-8-sig", "gb18030"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise SubmissionError("CSV 无法解码，请使用 UTF-8 或 GB18030 编码")
+
+
 def parse_edit_csv(data: bytes | str) -> list[dict]:
     """Parse edit-list bytes/text into validated row dicts (0-based frames)."""
     if isinstance(data, bytes):
-        if len(data) > MAX_UPLOAD_BYTES:
-            raise SubmissionError(
-                f"CSV 文件过大（上限 {MAX_UPLOAD_BYTES // (1024 * 1024)} MB）"
-            )
-        for encoding in ("utf-8-sig", "gb18030"):
-            try:
-                text = data.decode(encoding)
-                break
-            except UnicodeDecodeError:
-                continue
-        else:
-            raise SubmissionError("CSV 无法解码，请使用 UTF-8 或 GB18030 编码")
+        text = _decode(data)
     else:
         text = data
     if not text.strip():
@@ -160,3 +162,107 @@ def parse_edit_csv(data: bytes | str) -> list[dict]:
 
 def parse_edit_csv_checked(data: bytes | str) -> list:
     return validate_rows(parse_edit_csv(data))
+
+
+REPORT_HEADER_ALIASES = {
+    "orig_reel": {"原卷号", "原卷", "reel", "reel_no", "orig_reel", "source reel"},
+    "arch_start": {
+        "档案起帧", "档案帧", "档案起始帧", "起帧", "起始帧",
+        "archive_start", "arch_start", "start", "in", "in_frame",
+    },
+    "frame_count": {"帧数", "长度", "帧长", "count", "frames", "duration", "frame_count"},
+}
+
+REPORT_HEADER_LABELS = {
+    "orig_reel": "原卷号",
+    "arch_start": "档案起帧",
+    "frame_count": "帧数",
+}
+
+
+def _header_map_for(header, aliases, labels) -> dict[str, int]:
+    mapping: dict[str, int] = {}
+    for index, cell in enumerate(header):
+        key = _norm_header(cell)
+        if not key:
+            continue
+        for field, names in aliases.items():
+            if key in {_norm_header(a) for a in names} and field not in mapping:
+                mapping[field] = index
+    missing = [f for f in aliases if f not in mapping]
+    if missing:
+        raise SubmissionError(
+            "CSV 表头缺少列: " + "、".join(labels[f] for f in missing)
+        )
+    return mapping
+
+
+def parse_report_csv(data: bytes | str) -> list[dict]:
+    """Parse an actual-copy report CSV: ``原卷号,档案起帧,帧数``.
+
+    Column order is fixed but common Chinese/English header aliases are
+    accepted.  Each row describes an archive interval that was actually
+    printed; containment against the order's own new-copy ranges is checked
+    later, inside the write transaction.
+    """
+    if isinstance(data, bytes):
+        text = _decode(data)
+    else:
+        text = data
+    if not text.strip():
+        raise SubmissionError("CSV 文件为空")
+
+    reader = csv.reader(io.StringIO(text, newline=""))
+    try:
+        header = next(reader)
+    except StopIteration:  # pragma: no cover - guarded by the empty check
+        raise SubmissionError("CSV 文件为空") from None
+    mapping = _header_map_for(header, REPORT_HEADER_ALIASES, REPORT_HEADER_LABELS)
+
+    rows: list[dict] = []
+    problems: list[str] = []
+    for line_no, record in enumerate(reader, start=2):
+        if not any((cell or "").strip() for cell in record):
+            continue
+        if len(record) < len(header):
+            problems.append(
+                f"第 {line_no} 行列数不足（{len(record)} < {len(header)}）"
+            )
+            continue
+        try:
+            orig_reel = record[mapping["orig_reel"]].strip()
+            arch_start = _parse_int(
+                record[mapping["arch_start"]], line_no, "档案起帧"
+            )
+            frame_count = _parse_int(
+                record[mapping["frame_count"]], line_no, "帧数"
+            )
+        except SubmissionError as exc:
+            problems.extend(exc.messages)
+            continue
+        if not orig_reel:
+            problems.append(f"第 {line_no} 行原卷号为空")
+            continue
+        if frame_count <= 0:
+            problems.append(f"第 {line_no} 行帧数必须大于 0")
+            continue
+        if arch_start + frame_count > MAX_FRAME:
+            problems.append(f"第 {line_no} 行帧段超出允许范围")
+            continue
+        rows.append(
+            {
+                "row_index": len(rows) + 1,
+                "orig_reel": orig_reel,
+                "arch_start": arch_start,
+                "frame_count": frame_count,
+            }
+        )
+        if len(rows) > MAX_ROWS:
+            problems.append(f"CSV 行数过多（上限 {MAX_ROWS} 行）")
+            break
+
+    if problems:
+        raise SubmissionError(problems)
+    if not rows:
+        raise SubmissionError("CSV 中没有有效的实拷记录")
+    return rows

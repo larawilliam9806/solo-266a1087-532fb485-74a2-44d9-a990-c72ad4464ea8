@@ -450,7 +450,7 @@ def _order_report(conn: sqlite3.Connection, order) -> dict:
         (order_id,),
     ).fetchall()
 
-    return {
+    report = {
         "order_no": order["order_no"],
         "film_no": order["film_no"],
         "created_at": order["created_at"],
@@ -485,18 +485,34 @@ def _order_report(conn: sqlite3.Connection, order) -> dict:
         ],
     }
 
+    # Actual-copy reconciliation: missing archive ranges per shot, first-copy
+    # order annotations and pickup readiness.  Imported lazily because the
+    # reports module imports helpers from this one.
+    from .reports import enrich_order_report
+
+    return enrich_order_report(conn, report, order_id)
+
 
 def get_order(db_path: str | Path, order_no: str) -> dict | None:
     conn = connect(db_path)
     try:
+        # One explicit read transaction makes the whole query use a single
+        # committed snapshot, even while report batches land concurrently.
+        conn.execute("BEGIN")
         order = conn.execute(
             "SELECT id, order_no, film_no, created_at, row_count "
             "FROM orders WHERE order_no = ?",
             (order_no,),
         ).fetchone()
         if order is None:
+            conn.execute("COMMIT")
             return None
-        return _order_report(conn, order)
+        report = _order_report(conn, order)
+        conn.execute("COMMIT")
+        return report
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
     finally:
         conn.close()
 
@@ -504,12 +520,18 @@ def get_order(db_path: str | Path, order_no: str) -> dict | None:
 def list_orders(db_path: str | Path, limit: int = 50) -> list[dict]:
     conn = connect(db_path)
     try:
+        conn.execute("BEGIN")
         rows = conn.execute(
             "SELECT order_no, film_no, created_at, row_count FROM orders "
             "ORDER BY id DESC LIMIT ?",
             (limit,),
         ).fetchall()
-        return [dict(r) for r in rows]
+        result = [dict(r) for r in rows]
+        conn.execute("COMMIT")
+        return result
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
     finally:
         conn.close()
 
@@ -518,11 +540,13 @@ def reel_state(db_path: str | Path, orig_reel: str) -> dict | None:
     """Return the archive tail and coverage index of one original reel."""
     conn = connect(db_path)
     try:
+        conn.execute("BEGIN")
         reel = conn.execute(
             "SELECT id, orig_reel, next_frame FROM reels WHERE orig_reel = ?",
             (orig_reel,),
         ).fetchone()
         if reel is None:
+            conn.execute("COMMIT")
             return None
         segments = conn.execute(
             "SELECT s.orig_start, s.frame_count, s.arch_start, "
@@ -532,7 +556,7 @@ def reel_state(db_path: str | Path, orig_reel: str) -> dict | None:
             "WHERE s.reel_id = ? ORDER BY s.orig_start",
             (reel["id"],),
         ).fetchall()
-        return {
+        result = {
             "orig_reel": reel["orig_reel"],
             "next_frame": reel["next_frame"],
             "segments": [
@@ -548,5 +572,10 @@ def reel_state(db_path: str | Path, orig_reel: str) -> dict | None:
                 for s in segments
             ],
         }
+        conn.execute("COMMIT")
+        return result
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
     finally:
         conn.close()

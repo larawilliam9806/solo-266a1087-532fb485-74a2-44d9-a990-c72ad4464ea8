@@ -6,9 +6,76 @@
     <div>
       <h1>单号 {{ order.order_no }}</h1>
       <p class="hint">成片号 {{ order.film_no }} · {{ order.row_count }} 个镜头行 · 交档时间 {{ order.created_at }} (UTC)</p>
+      {% if order.ready_for_pickup %}
+      <p class="status ready">本单所有镜头的档案帧均已实拷确认，可取片。</p>
+      {% else %}
+      <p class="status pending">尚有镜头等待实拷确认，暂不可取片。</p>
+      {% endif %}
     </div>
     <a class="button-link" href="{{ url_for('api_order', order_no=order.order_no) }}">JSON</a>
   </div>
+</section>
+
+<section class="card">
+  <h2>实拷回报</h2>
+  <p class="hint">拷完胶片后上传实拷 CSV，每行 <code>原卷号,档案起帧,帧数</code>。
+  每行只能确认本单安排新拷的档案帧，可跨相邻的新拷段；任一行越界或保存失败，整份回报不生效。
+  分批回报可乱序、重叠提交，已确认范围自动取并集。</p>
+
+  {% if errors %}
+  <div class="errors" role="alert">
+    <strong>本次回报未生效，确认范围未发生任何改动：</strong>
+    <ul>
+      {% for message in errors %}<li>{{ message }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  <form method="post" action="{{ url_for('order_report', order_no=order.order_no) }}"
+        enctype="multipart/form-data" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>
+      <span>实拷 CSV</span>
+      <input type="file" name="report_file" accept=".csv,text/csv" required>
+    </label>
+    <button type="submit">提交实拷回报</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>本单新拷确认进度</h2>
+  <p class="hint">只统计本单安排新拷（首拷）的档案帧；沿用帧由首拷单的回报确认。</p>
+  {% if order.new_copy_confirmation %}
+  <table>
+    <thead>
+      <tr><th>原卷号</th><th>本单新拷档案帧段</th><th>已确认帧段</th><th>仍缺帧段</th><th>状态</th></tr>
+    </thead>
+    <tbody>
+      {% for item in order.new_copy_confirmation %}
+      <tr>
+        <td><a href="{{ url_for('reel_detail', orig_reel=item.orig_reel) }}">{{ item.orig_reel }}</a></td>
+        <td class="mono">
+          {% for r in item.new_ranges %}[{{ r.arch_start }}, {{ r.arch_end }})<br>{% endfor %}
+        </td>
+        <td class="mono">
+          {% if item.confirmed_ranges %}{% for r in item.confirmed_ranges %}[{{ r.arch_start }}, {{ r.arch_end }})<br>{% endfor %}
+          {% else %}<span class="hint">—</span>{% endif %}
+        </td>
+        <td class="mono">
+          {% if item.missing_ranges %}{% for r in item.missing_ranges %}[{{ r.arch_start }}, {{ r.arch_end }})<br>{% endfor %}
+          {% else %}<span class="hint">—</span>{% endif %}
+        </td>
+        <td>
+          {% if item.fully_confirmed %}<span class="tag new">已确认</span>
+          {% else %}<span class="tag pending-tag">待回报</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="hint">本单没有安排新拷的帧，全部沿用既有档案；请以各首拷单的回报为准。</p>
+  {% endif %}
 </section>
 
 <section class="card">
@@ -42,7 +109,8 @@
 
 <section class="card">
   <h2>取帧单：每个镜头的档案读取顺序</h2>
-  <p class="hint">按 seg 顺序读取各档案帧段并依次拼接，即可还原该镜头的原始帧序。</p>
+  <p class="hint">按 seg 顺序读取各档案帧段并依次拼接，即可还原该镜头的原始帧序。
+  镜头所需档案帧全部经对应首拷单确认后，才标记为可取片。</p>
   {% for shot in order.shots %}
   <details class="shot" open>
     <summary>
@@ -50,7 +118,34 @@
       · 原卷 <a href="{{ url_for('reel_detail', orig_reel=shot.orig_reel) }}">{{ shot.orig_reel }}</a>
       <span class="mono">[{{ shot.orig_start }}, {{ shot.orig_end }})</span>
       · {{ shot.frame_count }} 帧
+      {% if shot.ready_for_pickup %}<span class="tag new">可取片</span>
+      {% else %}<span class="tag pending-tag">待确认</span>{% endif %}
     </summary>
+    {% if shot.missing_segments %}
+    <div class="missing">
+      <strong>还缺以下档案帧段（注明首拷单号）：</strong>
+      <table>
+        <thead><tr><th>原卷号</th><th>缺失档案帧段</th><th>帧数</th><th>对应原卷帧段</th><th>首拷单号</th></tr></thead>
+        <tbody>
+          {% for m in shot.missing_segments %}
+          <tr>
+            <td>{{ m.orig_reel }}</td>
+            <td class="mono">[{{ m.arch_start }}, {{ m.arch_end }})</td>
+            <td class="num">{{ m.frame_count }}</td>
+            <td class="mono">[{{ m.orig_start }}, {{ m.orig_end }})</td>
+            <td>
+              {% if m.first_copy_order_no %}
+              <a href="{{ url_for('order_detail', order_no=m.first_copy_order_no) }}">{{ m.first_copy_order_no }}</a>
+              {% else %}—{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="hint ok-line">该镜头所需档案帧已全部实拷确认。</p>
+    {% endif %}
     <table>
       <thead>
         <tr><th>顺序</th><th>档案帧段</th><th>帧数</th><th>对应原卷帧段</th></tr>
@@ -68,6 +163,32 @@
     </table>
   </details>
   {% endfor %}
+</section>
+
+<section class="card">
+  <h2>已提交的实拷回报（{{ order.copy_reports | length }} 批）</h2>
+  {% if order.copy_reports %}
+  {% for batch in order.copy_reports %}
+  <details class="shot">
+    <summary>批次 {{ batch.id }} · {{ batch.created_at }} (UTC) · {{ batch.row_count }} 行</summary>
+    <table>
+      <thead><tr><th>行</th><th>原卷号</th><th>档案帧段</th><th>帧数</th></tr></thead>
+      <tbody>
+        {% for r in batch.rows %}
+        <tr>
+          <td class="num">{{ r.row_index }}</td>
+          <td>{{ r.orig_reel }}</td>
+          <td class="mono">[{{ r.arch_start }}, {{ r.arch_end }})</td>
+          <td class="num">{{ r.frame_count }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endfor %}
+  {% else %}
+  <p class="hint">本单尚未收到实拷回报。</p>
+  {% endif %}
 </section>
 
 {% if order.touched_reels %}
